@@ -1,0 +1,132 @@
+# ---------------------------
+# 1. Load required packages
+# ---------------------------
+install.packages(c("prism", "raster", "sp", "sf", "exactextractr"))
+library(prism)
+library(raster)
+library(sp)
+library(sf)
+library(exactextractr)
+
+# ---------------------------
+# 2. Set PRISM download directory
+# ---------------------------
+prism_set_dl_dir("./prism_data")
+
+# ---------------------------
+# 3. Download 30-year normal monthly precipitation (800m resolution)
+# ---------------------------
+get_prism_normals(
+  type = "ppt",
+  resolution = "800m",
+  mon = 1:12,
+  keepZip = FALSE
+)
+
+# ---------------------------
+# 4. Load ROI for clipping & stats
+# ---------------------------
+roi <- st_read("ROI.shp")
+
+# ---------------------------
+# 5. Find downloaded PRISM files
+# ---------------------------
+ppt_files <- prism_archive_subset("ppt", "monthly normals", resolution = "800m")
+
+# ---------------------------
+# 6. Create output folders
+# ---------------------------
+dir.create("rough_clipped_rasters", showWarnings = FALSE)
+dir.create("upsampled_clipped_rasters", showWarnings = FALSE)
+
+# ---------------------------
+# 7. Loop through months
+# ---------------------------
+monthly_means <- data.frame(
+  Month = 1:12,
+  MeanPrecip_mm = NA_real_
+)
+
+for (i in 1:12) {
+  # Get file path for month i
+  pd_name <- ppt_files[i]
+  raster_path <- pd_to_file(pd_name)
+
+  # Load raster to get CRS
+  ppt_rast <- raster(raster_path)
+  rast_crs <- crs(ppt_rast)
+
+  # Align ROI CRS to raster CRS if needed
+  if (is.na(st_crs(roi))) {
+    st_crs(roi) <- rast_crs
+  } else if (st_crs(roi) != rast_crs) {
+    roi <- st_transform(roi, rast_crs)
+  }
+
+  # ---------------------------
+  # 1st Clip: rough clip → keep any coarse pixel that touches ROI
+  # ---------------------------
+  rough_clip_file <- sprintf("rough_clipped_rasters/rough_month_%02d.tif", i)
+  rough_clip_cmd <- sprintf(
+    "gdalwarp -cutline ROI.shp -crop_to_cutline -wo CUTLINE_ALL_TOUCHED=TRUE -of GTiff -overwrite \"%s\" \"%s\"",
+    raster_path, rough_clip_file
+  )
+  system(rough_clip_cmd)
+
+  # ---------------------------
+  # Upsample: divide each pixel into 100 smaller pixels (10x finer X & Y)
+  # ---------------------------
+  rough_rast <- raster(rough_clip_file)
+  orig_res <- res(rough_rast)
+  new_xres <- orig_res[1] / 10
+  new_yres <- orig_res[2] / 10
+
+  upsampled_file <- sprintf("rough_clipped_rasters/upsampled_month_%02d.tif", i)
+
+  upsample_cmd <- sprintf(
+    "gdalwarp -tr %f %f -r near -of GTiff -overwrite \"%s\" \"%s\"",
+    new_xres, new_yres,
+    rough_clip_file,
+    upsampled_file
+  )
+  system(upsample_cmd)
+
+  # ---------------------------
+  # 2nd Clip: strict clip using centroid → only keep small pixels with centroid in ROI
+  # ---------------------------
+  final_file <- sprintf("upsampled_clipped_rasters/final_month_%02d.tif", i)
+  final_clip_cmd <- sprintf(
+    "gdalwarp -cutline ROI.shp -crop_to_cutline -of GTiff -overwrite \"%s\" \"%s\"",
+    upsampled_file, final_file
+  )
+  system(final_clip_cmd)
+
+  # ---------------------------
+  # Calculate mean for final upsampled clipped raster
+  # ---------------------------
+  final_rast <- raster(final_file)
+  mean_value <- exact_extract(final_rast, roi, 'mean')
+  monthly_means$MeanPrecip_mm[i] <- mean(mean_value, na.rm = TRUE)
+
+  # ---------------------------
+  # Delete intermediate files
+  # ---------------------------
+  unlink(rough_clip_file)
+  unlink(upsampled_file)
+}
+
+# ---------------------------
+# 8. Save means to CSV
+# ---------------------------
+write.csv(
+  monthly_means,
+  file = "ROI_30yr_monthly_precip_upsampled.csv",
+  row.names = FALSE
+)
+
+# ---------------------------
+# 9. Remove empty rough folder if desired
+# ---------------------------
+unlink("rough_clipped_rasters", recursive = TRUE)
+
+print("✅ Done! Final upsampled + strictly clipped rasters are in 'upsampled_clipped_rasters/'. CSV saved as 'ROI_30yr_monthly_precip_upsampled.csv'. Intermediate files deleted.")
