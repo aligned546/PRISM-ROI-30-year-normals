@@ -9,4 +9,4 @@ These scripts download 30-year normal monthly precipitation data (800 m) from 
 - Your shapefile (`ROI.shp` and associated files) in the project folder.  
 - For "upsampled-raster-clip"
   - GDAL
-  - R packages: 'sf, exactextractr'
+  - R packages: `sf`, `exactextractr`
